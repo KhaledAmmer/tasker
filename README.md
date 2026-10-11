@@ -78,6 +78,51 @@ pnpm test
 
 This project is licensed under the Unlicense. See `/LICENSE`.
 
+## Agents and MCP
+
+Tasker includes a local stdio MCP server. Your agent can discover tasks assigned to you, other users, or nobody, read their context, claim work, and submit its finished result for human review. The agent performs the actual work with its own tools; Tasker manages the queue, claims, and review handoff.
+
+1. Deploy the updated Convex schema/functions and app through your normal deployment workflow. For an already configured development deployment, use `pnpm exec convex dev --once`.
+2. Open **Settings → Agent connection**, create a named personal token, and copy it while it is visible. Tokens expire after the selected period and can be revoked there.
+3. Install this repository locally using Node 25.x and pnpm 11.x, then add the following to your MCP client's configuration. Replace the checkout path, Convex deployment URL, and token. On Windows, use a path such as `D:/projects/tasker`.
+
+```json
+{
+  "mcpServers": {
+    "tasker": {
+      "command": "pnpm",
+      "args": ["--dir", "/absolute/path/to/tasker", "exec", "tsx", "mcp/index.ts"],
+      "env": {
+        "TASKER_CONVEX_URL": "https://your-deployment.convex.cloud",
+        "TASKER_API_TOKEN": "YOUR_AGENT_TOKEN"
+      }
+    }
+  }
+}
+```
+
+Use the `.convex.cloud` deployment URL, not the `.convex.site` HTTP-action URL. `TASKER_API_TOKEN` belongs in the MCP client's environment; never prefix it with `VITE_`. Settings provides this configuration with the backend URL and newly created token filled in.
+
+The server exposes five tools:
+
+| Tool | Purpose |
+| --- | --- |
+| `list_tasks` | Filter by `assignment`: `mine` (default), `others`, `unassigned`, `assignee` (requires `assigneeId`), or `all`; optionally filter `projectId` and `statuses`. Pages contain up to 100 tasks; pass `nextCursor` as `cursor` for the next page. |
+| `get_task` | Read the description, rich content, checklist, comments, parent/subtasks, assignee, and project workflow. |
+| `claim_task` | Pass `issueId` and a unique `runId` to claim work and move it to `in_progress`. Repeat with the same token/run ID before the one-hour lease expires to renew it. |
+| `submit_task_for_review` | Pass `issueId`, the claiming `runId`, and a nonempty `summary` containing results, verification, and artifact links. Atomically adds a comment, moves to `in_review`, and releases the claim. |
+| `release_task` | Abandon a claim and restore the previous status if a person has not changed the status. |
+
+By default, discovery excludes archived/deleted/completed tasks, archived projects, tasks already in `in_review`, and live claims. Set `includeClaimed: true` to inspect claimed tasks. For custom workflows, filter `statuses` explicitly and pass existing `workStatus` / `reviewStatus` keys to the corresponding tools. Missing workflow keys fail without modifying the task; `todo` and `done` cannot be work/review targets.
+
+Claims preserve the human assignee. All calls check the token owner's current account state, role, and project access. Viewers can read but cannot claim or submit. Competing live claims fail atomically. If a claim expires, reacquire it before submitting; if a response is lost, inspect `get_task` before retrying. Status changes and result comments appear in the existing task timeline.
+
+Example agent request:
+
+> Find one unassigned task in my project using Tasker. Read its details, claim it with a unique run ID, implement the work, and verify the result. Renew the claim if needed. Submit a summary with the verification results and relevant links for review. If blocked, release the task and explain the blocker.
+
+For a direct launch, set `TASKER_CONVEX_URL` and `TASKER_API_TOKEN` in the process environment and run `pnpm mcp`. Run `pnpm mcp:check` to type-check the adapter. Implementation references: [MCP SDK server documentation](https://ts.sdk.modelcontextprotocol.io/server) and [Convex runtime APIs](https://docs.convex.dev/functions/runtimes).
+
 ## Local Setup (Required)
 
 Use Node.js `25.x` and pnpm `11.x`. Deployment uses `nixpacks.toml` with pnpm 11 and a frozen lockfile.

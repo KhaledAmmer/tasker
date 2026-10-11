@@ -174,7 +174,8 @@ Workflow model progress:
 - [ ] Extend import/export from task-level JSON to full project-level import/export
 - [ ] Add CSV / Excel-compatible import and export support
 - [ ] Add import from other task tools if migration becomes important
-- [ ] Add API tokens or external API access if this becomes a platform
+- [x] Add personal, expiring, revocable tokens for scoped agent task access
+- [x] Add local MCP task discovery, claims, and completion handoff to human review
 
 ## Quality and Experience
 

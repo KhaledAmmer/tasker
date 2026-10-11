@@ -35,6 +35,18 @@ export default defineSchema({
     .index('by_globalRole', ['globalRole'])
     .index('by_isActive', ['isActive']),
 
+  agentTokens: defineTable({
+    userId: v.id('users'),
+    name: v.string(),
+    tokenHash: v.string(),
+    tokenPrefix: v.string(),
+    createdAt: v.number(),
+    expiresAt: v.optional(v.number()),
+    revokedAt: v.optional(v.number()),
+  })
+    .index('by_userId', ['userId'])
+    .index('by_tokenHash', ['tokenHash']),
+
   userNotes: defineTable({
     ownerId: v.id('users'),
     title: v.string(),
@@ -117,6 +129,14 @@ export default defineSchema({
     archived: v.boolean(),
     deletedAt: v.optional(v.number()),
     completedAt: v.optional(v.number()),
+    agentClaim: v.optional(v.object({
+      tokenId: v.id('agentTokens'),
+      userId: v.id('users'),
+      runId: v.string(),
+      expiresAt: v.number(),
+      previousStatus: v.string(),
+      workStatus: v.string(),
+    })),
     createdAt: v.number(),
     updatedAt: v.number(),
   })

@@ -367,7 +367,8 @@ function getIssueSelectionDepth(
   return depth
 }
 
-async function applyIssueUpdate(
+// Shared transaction helper. Callers must enforce issue write access first.
+export async function applyIssueUpdate(
   ctx: MutationCtx,
   {
     issue,

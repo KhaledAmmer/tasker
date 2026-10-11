@@ -1,5 +1,5 @@
 import { ConvexError } from 'convex/values'
-import type { Id } from '../_generated/dataModel'
+import type { Doc, Id } from '../_generated/dataModel'
 import type { MutationCtx, QueryCtx } from '../_generated/server'
 import type { GlobalRole } from '../constants'
 
@@ -110,6 +110,15 @@ export async function getAccessibleProjectIds(ctx: Ctx, userId: Id<'users'>) {
 
 export async function requireProjectViewAccess(ctx: Ctx, projectId: Id<'projects'>) {
   const user = await requireCurrentUser(ctx)
+  return requireProjectViewAccessForUser(ctx, projectId, user)
+}
+
+// The caller must resolve the current active user through a trusted auth mechanism.
+export async function requireProjectViewAccessForUser(
+  ctx: Ctx,
+  projectId: Id<'projects'>,
+  user: Doc<'users'>,
+) {
   const project = await ctx.db.get(projectId)
 
   if (!project) {
