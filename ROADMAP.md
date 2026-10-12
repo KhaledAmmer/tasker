@@ -169,13 +169,17 @@ Workflow model progress:
 ## Integrations and Data Portability
 
 - [ ] Add notification integrations such as email, Slack, Discord, and similar channels
-- [ ] Add operations integrations such as GitHub
+- [x] Add GitHub repository connections, issue branch creation/linking, and PR lifecycle status sync
 - [ ] Add calendar sync
 - [ ] Extend import/export from task-level JSON to full project-level import/export
 - [ ] Add CSV / Excel-compatible import and export support
 - [ ] Add import from other task tools if migration becomes important
 - [x] Add personal, expiring, revocable tokens for scoped agent task access
 - [x] Add local MCP task discovery, claims, and completion handoff to human review
+
+Integration progress:
+- 2026-10-12: Implemented a GitHub App integration with project work/review mappings, issue branch creation/linking, signed webhook synchronization, periodic recovery, manual pause/resume, authorization checks, and hierarchy-safe completion. Deployment requires the App credentials and installation documented in `docs/github-integration.md`.
+- 2026-10-12: Resolved review findings by rejecting stale GitHub connection saves and invalidating agent claims after intervening status changes, including status round trips, cascade completion, and workflow transfers.
 
 ## Quality and Experience
 
