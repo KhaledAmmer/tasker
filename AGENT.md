@@ -19,6 +19,7 @@ It supports:
 - Task lists, task status-based Kanban, a task calendar, and a Gantt timeline with start/due dates and ranges.
 - One-level sub-tasks with progress rollups.
 - Comments and activity history.
+- Local MCP task discovery, renewable agent claims, and result submission for human review.
 - Project archive state and issue soft-delete behavior.
 
 ## Working Rule For Future Agents
@@ -120,6 +121,8 @@ Key backend files:
 - [`convex/userNotes.ts`](./convex/userNotes.ts): private global user note CRUD and search
 - [`convex/projects.ts`](./convex/projects.ts): project CRUD, members, sidebar, activity
 - [`convex/issues.ts`](./convex/issues.ts): task CRUD, filtering, hierarchy, status rules, and first-pass bulk updates
+- [`convex/agentTokens.ts`](./convex/agentTokens.ts): Clerk-authenticated personal agent token creation, safe metadata listing, and revocation
+- [`convex/agentTasks.ts`](./convex/agentTasks.ts): token-authenticated task discovery/context and atomic claim, release, and review submission
 - [`convex/notifications.ts`](./convex/notifications.ts): inbox queries/mutations plus internal notification creation and email delivery state
 - [`convex/notificationsActions.ts`](./convex/notificationsActions.ts): SMTP email delivery actions for notifications
 - [`convex/myWork.ts`](./convex/myWork.ts): personalized assigned-work overview for the My Work route
@@ -416,6 +419,20 @@ If the task is about:
 - Dashboard:
   - [`convex/dashboard.ts`](./convex/dashboard.ts)
   - [`src/routes/_app.dashboard.tsx`](./src/routes/_app.dashboard.tsx)
+
+## Agent / MCP Workflow
+
+- Local stdio entrypoint: `mcp/index.ts`; tool adapter: `mcp/server.ts`; launch with `pnpm mcp` and type-check with `pnpm mcp:check`.
+- MCP environment: `TASKER_CONVEX_URL` (`.convex.cloud` URL) and `TASKER_API_TOKEN`. Secrets are never client `VITE_` variables.
+- Settings composes `src/features/tasker/agents/AgentConnectionCard.tsx` for cryptographically random personal tokens, one-time secret display, client configuration, and revocation.
+- `agentTokens` stores SHA-256 hashes only. `convex/lib/agentTokens.ts` resolves active, non-revoked/non-expired credentials to the owner's current active user record on every call.
+- `requireProjectViewAccessForUser` shares existing project access rules across Clerk sessions and validated agent credentials; callers must authenticate the active user first. `applyIssueUpdate` is an authorized-caller transaction helper shared by UI mutations and agent status transitions; it is not an exposed Convex mutation.
+- `issues.agentClaim` is optional for existing records; token/run ownership and a one-hour lease prevent competing agents from claiming the same work. Claims preserve the task assignee.
+- Discovery supports mine/others/unassigned/specific-assignee/all within accessible active projects, with optional project/status filters. `agentTasks.list` / MCP `list_tasks` fetch unfinished work; `agentTasks.listDone` / MCP `list_done_tasks` fetch completed work with the same assignment/project filters. Archived/deleted tasks and archived projects remain excluded. Default unfinished discovery skips `in_review` and live claims.
+- Both list endpoints share bounded database pagination: at most 100 candidate rows and a 1 MiB issue-read budget, followed by filtering and current project-access checks. Short/empty pages can have `nextCursor`; continue until it is null, keeping the same endpoint and filters. Cursors are opaque Convex cursors, replacing the old task-ID cursor. Global completed discovery uses `issues.by_status`; project/assignee discovery uses the existing indexes.
+- Review submission requires the active claiming token/run plus a result summary, then atomically writes a comment, changes to `in_review`, and removes the claim. The agent executes work using its own tools; the MCP server does not execute arbitrary commands.
+- Custom workflows may supply explicit work/review keys. Missing keys, protected work/review targets (`todo`, `done`), archived/deleted/done tasks, read-only users, lost project access, expired claims, and completed ancestors fail without committing changes. Human status edits are preserved on release and block submission.
+- Feature coverage: `tests/agentTasks.test.ts`, `tests/mcp.test.ts` (actual MCP protocol and stdio startup), and `src/features/tasker/agents/AgentConnectionCard.test.tsx`.
 
 ## Short Summary
 

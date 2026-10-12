@@ -6,6 +6,7 @@ import { Button } from "#/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "#/components/ui/card";
 import { Input } from "#/components/ui/input";
 import { Label } from "#/components/ui/label";
+import { AgentConnectionCard } from "#/features/tasker/agents/AgentConnectionCard";
 import { PageHeader } from "#/features/tasker/components/PageHeader";
 import { globalRoleLabel } from "#/features/tasker/model";
 import { api } from "#convex/_generated/api";
@@ -57,6 +58,8 @@ function SettingsPage() {
 					</div>
 				</CardContent>
 			</Card>
+
+			<AgentConnectionCard />
 
 			<Card>
 				<CardHeader>
