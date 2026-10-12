@@ -21,6 +21,7 @@ async function context(role = 'member') {
     [tokenId, { _id: tokenId, userId, tokenHash: await hashToken(token), name: 'Agent', tokenPrefix: token.slice(0, 12), createdAt: 1 }],
   ])
   const tableFor = (id: string) => id === userId ? 'users' : id === projectId || id.startsWith('project-') ? 'projects' : id === tokenId ? 'agentTokens' : id === issueId || id.startsWith('issue-') ? 'issues' : id.split('-')[0]
+  const reads = { issueRows: 0, issueCollections: 0, pages: [] as { cursor: string | null, numItems: number, maximumRowsRead: number, maximumBytesRead: number }[] }
   const query = (table: string) => {
     const conditions: [string, unknown][] = []
     const rows = () => [...records.entries()].filter(([id, row]) => tableFor(id) === table && conditions.every(([key, value]) => row[key] === value)).map(([, row]) => row)
@@ -30,8 +31,24 @@ async function context(role = 'member') {
         cb(q)
         return chain
       },
-      collect: async () => rows(), unique: async () => rows()[0] ?? null,
+      collect: async () => {
+        if (table === 'issues') reads.issueCollections++
+        return rows()
+      }, unique: async () => rows()[0] ?? null,
       take: async (limit: number) => rows().slice(0, limit), order: () => chain,
+      paginate: async (options: typeof reads.pages[number]) => {
+        reads.pages.push(options)
+        const all = rows()
+        const start = options.cursor === null ? 0 : Number(options.cursor.slice('page:'.length))
+        let end = start
+        let bytes = 0
+        while (end < all.length && end - start < Math.min(options.numItems, options.maximumRowsRead) && bytes < options.maximumBytesRead) {
+          bytes += JSON.stringify(all[end]).length
+          end++
+        }
+        reads.issueRows += end - start
+        return { page: all.slice(start, end), isDone: end === all.length, continueCursor: `page:${end}` }
+      },
     }
     return chain
   }
@@ -43,7 +60,7 @@ async function context(role = 'member') {
     return id
   })
   const ctx = { auth: { getUserIdentity: async () => ({ subject: 'clerk' }) }, db: { get: async (id: string) => records.get(id) ?? null, query, patch, insert } } as unknown as MutationCtx
-  return { ctx, records, patch, insert }
+  return { ctx, records, patch, insert, reads }
 }
 
 describe('agent token authentication', () => {
@@ -80,7 +97,7 @@ describe('agent task queue', () => {
     const { ctx, records } = await context()
     records.set('issue-other', { ...records.get(issueId), _id: 'issue-other' })
     const first = await handler(tasks.list)(ctx, { token, limit: 1 })
-    expect(first.nextCursor).toBe(issueId)
+    expect(first.nextCursor).toBe('page:1')
     const second = await handler(tasks.list)(ctx, { token, limit: 1, cursor: first.nextCursor })
     expect(second.tasks[0].issue._id).toBe('issue-other')
     expect(second.nextCursor).toBeNull()
@@ -131,6 +148,108 @@ describe('agent task queue', () => {
     records.get(projectId).archived = true
     expect((await handler(tasks.list)(ctx, { token })).tasks).toEqual([])
     await expect(handler(tasks.claim)(ctx, { token, issueId, runId: 'run' })).rejects.toThrow()
+  })
+})
+
+describe('bounded task discovery', () => {
+  it.each([['active', tasks.list, 'todo'], ['done', tasks.listDone, 'done']] as const)('%s pages read only a bounded slice and forward the database cursor', async (_name, endpoint, status) => {
+    const { ctx, records, reads } = await context()
+    records.get(issueId).status = status
+    for (let i = 0; i < 250; i++) {
+      records.set(`issue-${i}`, { ...records.get(issueId), _id: `issue-${i}` })
+    }
+    const first = await handler(endpoint)(ctx, { token, projectId, limit: 25 })
+    expect(first.tasks).toHaveLength(25)
+    expect(reads.issueRows).toBe(25)
+    const second = await handler(endpoint)(ctx, { token, projectId, limit: 25, cursor: first.nextCursor })
+    expect(second.tasks).toHaveLength(25)
+    expect(new Set([...first.tasks, ...second.tasks].map((row: any) => row.issue._id)).size).toBe(50)
+    expect(reads.issueRows).toBe(50)
+    expect(reads.issueCollections).toBe(0)
+    expect(reads.pages[1]).toEqual({ cursor: first.nextCursor, numItems: 25, maximumRowsRead: 100, maximumBytesRead: 1024 * 1024 })
+  })
+  it.each([['active', tasks.list, 'todo'], ['done', tasks.listDone, 'done']] as const)('%s continues past empty unauthorized pages and rechecks access', async (_name, endpoint, status) => {
+    const { ctx, records, reads } = await context()
+    records.set('project-private', { ...records.get(projectId), _id: 'project-private', createdBy: 'other' })
+    records.get(issueId).status = status
+    records.set('issue-visible', { ...records.get(issueId), _id: 'issue-visible' })
+    records.get(issueId).projectId = 'project-private'
+    const first = await handler(endpoint)(ctx, { token, assignment: 'all', limit: 1 })
+    expect(first.tasks).toEqual([])
+    expect(first.nextCursor).not.toBeNull()
+    const args = { token, assignment: 'all', limit: 1, cursor: first.nextCursor }
+    const second = await handler(endpoint)(ctx, args)
+    expect(second.tasks.map((row: any) => row.issue._id)).toEqual(['issue-visible'])
+    expect(second.nextCursor).toBeNull()
+    records.get(projectId).createdBy = 'other'
+    expect((await handler(endpoint)(ctx, args)).tasks).toEqual([])
+    const pagesBefore = reads.pages.length
+    await expect(handler(endpoint)(ctx, { token, projectId })).rejects.toThrow()
+    expect(reads.pages).toHaveLength(pagesBefore)
+  })
+  it.each([['active', tasks.list, 'todo'], ['done', tasks.listDone, 'done']] as const)('%s honors the byte budget and skips archived rows without ending pagination', async (_name, endpoint, status) => {
+    const { ctx, records, reads } = await context()
+    Object.assign(records.get(issueId), { status, archived: true, description: 'x'.repeat(400_000) })
+    for (let i = 0; i < 5; i++) {
+      records.set(`issue-${i}`, { ...records.get(issueId), _id: `issue-${i}` })
+    }
+    records.get('issue-4').archived = false
+    const first = await handler(endpoint)(ctx, { token, projectId, limit: 100 })
+    expect(first.tasks).toEqual([])
+    expect(first.nextCursor).not.toBeNull()
+    expect(reads.issueRows).toBe(3)
+    const second = await handler(endpoint)(ctx, { token, projectId, limit: 100, cursor: first.nextCursor })
+    expect(second.tasks.map((row: any) => row.issue._id)).toEqual(['issue-4'])
+    expect(second.nextCursor).toBeNull()
+  })
+  it('lists only non-deleted, non-archived done tasks using the assignment and project filters', async () => {
+    const { ctx, records } = await context('viewer')
+    records.get(issueId).status = 'done'
+    for (const [id, changes] of [
+      ['issue-other', { assigneeId: 'other' }],
+      ['issue-unassigned', { assigneeId: undefined }],
+      ['issue-active', { status: 'todo' }],
+      ['issue-review', { status: 'in_review' }],
+      ['issue-archived', { archived: true }],
+      ['issue-deleted', { deletedAt: 1 }],
+    ] as const) records.set(id, { ...records.get(issueId), _id: id, ...changes })
+    for (const [assignment, expected] of [
+      ['mine', [issueId]], ['others', ['issue-other']], ['unassigned', ['issue-unassigned']],
+      ['assignee', ['issue-other']], ['all', [issueId, 'issue-other', 'issue-unassigned']],
+    ] as const) {
+      const args = { token, projectId, assignment, ...(assignment === 'assignee' ? { assigneeId: 'other' } : {}) }
+      const result = await handler(tasks.listDone)(ctx, args)
+      expect(result.tasks.map((row: any) => row.issue._id)).toEqual(expected)
+      expect(result.tasks.every((row: any) => row.canWrite === false)).toBe(true)
+    }
+    records.get(projectId).archived = true
+    expect((await handler(tasks.listDone)(ctx, { token, projectId, assignment: 'all' })).tasks).toEqual([])
+    expect((await handler(tasks.listDone)(ctx, { token, assignment: 'all' })).tasks).toEqual([])
+  })
+  it('includes joined projects and permits admins to read other projects in done discovery', async () => {
+    const { ctx, records } = await context()
+    records.get(issueId).status = 'done'
+    records.get(projectId).createdBy = 'other'
+    records.set('projectMembers-1', { projectId, userId })
+    expect((await handler(tasks.listDone)(ctx, { token })).tasks).toHaveLength(1)
+    records.delete('projectMembers-1')
+    expect((await handler(tasks.listDone)(ctx, { token })).tasks).toHaveLength(0)
+    records.get(userId).globalRole = 'admin'
+    expect((await handler(tasks.listDone)(ctx, { token, assignment: 'all' })).tasks).toHaveLength(1)
+  })
+  it('validates done discovery arguments and authenticates every page', async () => {
+    const { ctx, records, reads } = await context()
+    for (const args of [{ limit: 0 }, { limit: 101 }, { limit: 1.5 }, { assignment: 'assignee' }, { assigneeId: userId }]) {
+      await expect(handler(tasks.listDone)(ctx, { token, ...args })).rejects.toThrow()
+    }
+    for (const change of [{ revokedAt: 1 }, { revokedAt: undefined, expiresAt: 1 }]) {
+      Object.assign(records.get(tokenId), change)
+      await expect(handler(tasks.listDone)(ctx, { token, cursor: 'page:1' })).rejects.toThrow()
+    }
+    records.get(tokenId).expiresAt = undefined
+    records.get(userId).isActive = false
+    await expect(handler(tasks.listDone)(ctx, { token })).rejects.toThrow()
+    expect(reads.pages).toHaveLength(0)
   })
 })
 

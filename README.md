@@ -103,17 +103,20 @@ Tasker includes a local stdio MCP server. Your agent can discover tasks assigned
 
 Use the `.convex.cloud` deployment URL, not the `.convex.site` HTTP-action URL. `TASKER_API_TOKEN` belongs in the MCP client's environment; never prefix it with `VITE_`. Settings provides this configuration with the backend URL and newly created token filled in.
 
-The server exposes five tools:
+The server exposes six tools:
 
 | Tool | Purpose |
 | --- | --- |
 | `list_tasks` | Filter by `assignment`: `mine` (default), `others`, `unassigned`, `assignee` (requires `assigneeId`), or `all`; optionally filter `projectId` and `statuses`. Pages contain up to 100 tasks; pass `nextCursor` as `cursor` for the next page. |
+| `list_done_tasks` | Fetch completed tasks with the same assignment/project filters and pagination as `list_tasks`. Defaults to your completed tasks. Archived/deleted tasks and archived projects remain excluded. |
 | `get_task` | Read the description, rich content, checklist, comments, parent/subtasks, assignee, and project workflow. |
 | `claim_task` | Pass `issueId` and a unique `runId` to claim work and move it to `in_progress`. Repeat with the same token/run ID before the one-hour lease expires to renew it. |
 | `submit_task_for_review` | Pass `issueId`, the claiming `runId`, and a nonempty `summary` containing results, verification, and artifact links. Atomically adds a comment, moves to `in_review`, and releases the claim. |
 | `release_task` | Abandon a claim and restore the previous status if a person has not changed the status. |
 
 By default, discovery excludes archived/deleted/completed tasks, archived projects, tasks already in `in_review`, and live claims. Set `includeClaimed: true` to inspect claimed tasks. For custom workflows, filter `statuses` explicitly and pass existing `workStatus` / `reviewStatus` keys to the corresponding tools. Missing workflow keys fail without modifying the task; `todo` and `done` cannot be work/review targets.
+
+Both list tools use database pagination with bounded reads (up to 100 candidate rows and a 1 MiB issue-read budget per call). Filtering and access checks can produce short or empty pages. Continue passing `nextCursor` as `cursor` until it is `null`; an empty `tasks` array does not mean discovery is finished. Keep the same tool and filters for each continuation. Cursors are opaque database cursors, not task IDs; restart any pagination started before this update. `list_done_tasks` maps to the Convex query `agentTasks.listDone` and does not make completed tasks claimable. Deploy the updated schema, including the `issues.by_status` index, before using the new endpoint.
 
 Claims preserve the human assignee. All calls check the token owner's current account state, role, and project access. Viewers can read but cannot claim or submit. Competing live claims fail atomically. If a claim expires, reacquire it before submitting; if a response is lost, inspect `get_task` before retrying. Status changes and result comments appear in the existing task timeline.
 

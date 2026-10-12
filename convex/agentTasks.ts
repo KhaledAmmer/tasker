@@ -1,10 +1,10 @@
-import { ConvexError, v } from 'convex/values'
+import { ConvexError, v, type Infer } from 'convex/values'
 import type { Doc, Id } from './_generated/dataModel'
 import { mutation, query, type MutationCtx, type QueryCtx } from './_generated/server'
 import { applyIssueUpdate } from './issues'
 import { createActivity } from './lib/activity'
 import { requireAgentUser } from './lib/agentTokens'
-import { canWrite, getAccessibleProjectIds, isAdmin, requireProjectViewAccessForUser } from './lib/auth'
+import { canWrite, getProjectMembership, isAdmin, requireProjectViewAccessForUser } from './lib/auth'
 import { ensureProjectStatusExists, normalizeProject } from './lib/projectStatuses'
 
 const LEASE_MS = 60 * 60 * 1000
@@ -47,43 +47,82 @@ function requireClaim(issue: Doc<'issues'>, tokenId: Id<'agentTokens'>, runId: s
   return claim
 }
 
-export const list = query({
-  args: { token: v.string(), projectId: v.optional(v.id('projects')), assignment: v.optional(assignmentValidator), assigneeId: v.optional(v.id('users')), statuses: v.optional(v.array(v.string())), limit: v.optional(v.number()), cursor: v.optional(v.string()), includeClaimed: v.optional(v.boolean()) },
-  handler: async (ctx, args) => {
-    const { user } = await requireAgentUser(ctx, args.token)
-    const assignment = args.assignment ?? 'mine'
-    if (assignment === 'assignee' && !args.assigneeId) fail('VALIDATION_ERROR', 'assigneeId is required for the assignee filter.')
-    if (args.assigneeId && assignment !== 'assignee') fail('VALIDATION_ERROR', 'Use assignment="assignee" with assigneeId.')
-    const limit = args.limit ?? 50
-    if (!Number.isInteger(limit) || limit < 1 || limit > 100) fail('VALIDATION_ERROR', 'limit must be an integer from 1 to 100.')
-    let projects: Doc<'projects'>[]
-    if (args.projectId) {
-      projects = [(await requireProjectViewAccessForUser(ctx, args.projectId, user)).project]
-    } else if (isAdmin(user.globalRole)) {
-      projects = await ctx.db.query('projects').collect()
+const listArgs = {
+  token: v.string(), projectId: v.optional(v.id('projects')),
+  assignment: v.optional(assignmentValidator), assigneeId: v.optional(v.id('users')),
+  limit: v.optional(v.number()), cursor: v.optional(v.string()),
+}
+const activeListArgs = v.object({
+  ...listArgs, statuses: v.optional(v.array(v.string())), includeClaimed: v.optional(v.boolean()),
+})
+
+async function listTasks(ctx: QueryCtx, args: Infer<typeof activeListArgs>, done: boolean) {
+  const { user } = await requireAgentUser(ctx, args.token)
+  const assignment = args.assignment ?? 'mine'
+  if (assignment === 'assignee' && !args.assigneeId) fail('VALIDATION_ERROR', 'assigneeId is required for the assignee filter.')
+  if (args.assigneeId && assignment !== 'assignee') fail('VALIDATION_ERROR', 'Use assignment="assignee" with assigneeId.')
+  const limit = args.limit ?? 50
+  if (!Number.isInteger(limit) || limit < 1 || limit > 100) fail('VALIDATION_ERROR', 'limit must be an integer from 1 to 100.')
+  const projects = new Map<Id<'projects'>, Doc<'projects'> | null>()
+  if (args.projectId) {
+    const { project } = await requireProjectViewAccessForUser(ctx, args.projectId, user)
+    if (project.archived) return { tasks: [], nextCursor: null }
+    projects.set(project._id, project)
+  }
+  const byAssignee = assignment === 'mine' || assignment === 'assignee' || assignment === 'unassigned'
+  const assigneeId = assignment === 'mine' ? user._id : args.assigneeId
+  let issues = ctx.db.query('issues').order('asc')
+  if (args.projectId) {
+    const projectId = args.projectId
+    if (done) {
+      issues = ctx.db.query('issues').withIndex('by_projectId_status', q => q.eq('projectId', projectId).eq('status', 'done'))
+    } else if (byAssignee) {
+      issues = ctx.db.query('issues').withIndex('by_projectId_assignee', q => q.eq('projectId', projectId).eq('assigneeId', assigneeId))
     } else {
-      const ids = await getAccessibleProjectIds(ctx, user._id)
-      projects = (await Promise.all(ids.map(id => ctx.db.get(id)))).filter((project): project is Doc<'projects'> => project !== null)
+      issues = ctx.db.query('issues').withIndex('by_projectId', q => q.eq('projectId', projectId))
     }
-    const rows = []
-    for (const project of projects.filter(project => !project.archived)) {
-      const issues = await ctx.db.query('issues').withIndex('by_projectId', q => q.eq('projectId', project._id)).collect()
-      for (const issue of issues) {
-        if (issue.deletedAt !== undefined || issue.archived || issue.status === 'done') continue
-        if (args.statuses?.length ? !args.statuses.includes(issue.status) : issue.status === 'in_review') continue
-        if (!args.includeClaimed && issue.agentClaim && issue.agentClaim.expiresAt > Date.now()) continue
-        if (assignment === 'mine' && issue.assigneeId !== user._id) continue
-        if (assignment === 'others' && (!issue.assigneeId || issue.assigneeId === user._id)) continue
-        if (assignment === 'unassigned' && issue.assigneeId) continue
-        if (assignment === 'assignee' && issue.assigneeId !== args.assigneeId) continue
-        if (args.cursor && issue._id <= args.cursor) continue
-        rows.push({ issue, project: { _id: project._id, name: project.name, key: project.key }, canWrite: canWrite(user.globalRole) })
-      }
+  } else if (byAssignee) {
+    issues = ctx.db.query('issues').withIndex('by_assignee', q => q.eq('assigneeId', assigneeId))
+  } else if (done) {
+    issues = ctx.db.query('issues').withIndex('by_status', q => q.eq('status', 'done'))
+  }
+  // Bound reads before filtering; an empty page can still have a continuation cursor.
+  const page = await issues.paginate({
+    numItems: limit, cursor: args.cursor ?? null,
+    maximumRowsRead: 100, maximumBytesRead: 1024 * 1024,
+  })
+  const tasks = []
+  for (const issue of page.page) {
+    if (issue.deletedAt !== undefined || issue.archived || (issue.status === 'done') !== done) continue
+    if (!done && (args.statuses?.length ? !args.statuses.includes(issue.status) : issue.status === 'in_review')) continue
+    if (!done && !args.includeClaimed && issue.agentClaim && issue.agentClaim.expiresAt > Date.now()) continue
+    if (assignment === 'mine' && issue.assigneeId !== user._id) continue
+    if (assignment === 'others' && (!issue.assigneeId || issue.assigneeId === user._id)) continue
+    if (assignment === 'unassigned' && issue.assigneeId) continue
+    if (assignment === 'assignee' && issue.assigneeId !== args.assigneeId) continue
+    if (!projects.has(issue.projectId)) {
+      const project = await ctx.db.get(issue.projectId)
+      const accessible = project && !project.archived && (
+        isAdmin(user.globalRole) || project.createdBy === user._id ||
+        await getProjectMembership(ctx, project._id, user._id)
+      )
+      projects.set(issue.projectId, accessible ? project : null)
     }
-    rows.sort((a, b) => a.issue._id < b.issue._id ? -1 : a.issue._id > b.issue._id ? 1 : 0)
-    const tasks = rows.slice(0, limit)
-    return { tasks, nextCursor: rows.length > limit ? tasks[tasks.length - 1].issue._id : null }
-  },
+    const project = projects.get(issue.projectId)
+    if (!project) continue
+    tasks.push({ issue, project: { _id: project._id, name: project.name, key: project.key }, canWrite: canWrite(user.globalRole) })
+  }
+  return { tasks, nextCursor: page.isDone ? null : page.continueCursor }
+}
+
+export const list = query({
+  args: activeListArgs,
+  handler: (ctx, args) => listTasks(ctx, args, false),
+})
+
+export const listDone = query({
+  args: listArgs,
+  handler: (ctx, args) => listTasks(ctx, args, true),
 })
 
 export const get = query({
