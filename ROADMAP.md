@@ -176,6 +176,7 @@ Workflow model progress:
 - [ ] Add import from other task tools if migration becomes important
 - [x] Add personal, expiring, revocable tokens for scoped agent task access
 - [x] Add local MCP task discovery, claims, and completion handoff to human review
+- [x] Bound MCP task-list database reads and add separate completed-task discovery with assignment/project filters (2026-10-12)
 
 Integration progress:
 - 2026-10-12: Implemented a GitHub App integration with project work/review mappings, issue branch creation/linking, signed webhook synchronization, periodic recovery, manual pause/resume, authorization checks, and hierarchy-safe completion. Deployment requires the App credentials and installation documented in `docs/github-integration.md`.

@@ -144,6 +144,7 @@ export default defineSchema({
     .index('by_projectId', ['projectId'])
     .index('by_projectId_issueNumber', ['projectId', 'issueNumber'])
     .index('by_projectId_status', ['projectId', 'status'])
+    .index('by_status', ['status'])
     .index('by_projectId_priority', ['projectId', 'priority'])
     .index('by_projectId_assignee', ['projectId', 'assigneeId'])
     .index('by_projectId_listId', ['projectId', 'listId'])
